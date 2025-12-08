@@ -49,6 +49,9 @@ fi
 
 source .venv/bin/activate
 
+export PYTHONUNBUFFERED=1
+export PYTHONDONTWRITEBYTECODE=1
+
 # Restore original environment variables (unset conflicting Qt paths)
 # This ensures we use the venv's Qt libraries instead of system/conda ones
 ORIG_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
@@ -85,6 +88,20 @@ fi
 export QT_QPA_PLATFORM=xcb
 export QT_XCB_GL_INTEGRATION=none
 
+export QT_OPENGL=software
+export QT_QUICK_BACKEND=software
+export LIBGL_ALWAYS_SOFTWARE=1
+
+export QT_X11_NO_MITSHM=1
+
+export QT_NO_GLIB=1
+
+export QT_LOGGING_RULES="*.debug=false;qt.qpa.*=false"
+
+export QT_XCB_FORCE_SOFTWARE_OPENGL=1
+
+export QT_XCB_FORCE_SOFTWARE_OPENGL=1
+
 # Check if x-anylabeling is installed
 if ! command -v x-anylabeling &> /dev/null; then
     echo "ERROR: x-anylabeling not found in venv!"
@@ -93,14 +110,28 @@ if ! command -v x-anylabeling &> /dev/null; then
 fi
 
 # Ensure GroundingDINO tokenizer file exists (fixes model loading error)
-echo "Checking GroundingDINO setup..."
-python "$SCRIPT_DIR/setup_groundingdino.py" || {
-    echo "WARNING: Failed to setup GroundingDINO tokenizer. Model may not load correctly."
-}
+# Quick check: skip if tokenizer file already exists and is valid
+TOKENIZER_FILE=$(python -c "import anylabeling; from pathlib import Path; print(Path(anylabeling.__file__).parent / 'services' / 'auto_labeling' / 'configs' / 'bert_base_uncased_tokenizer.json')" 2>/dev/null)
+if [ -n "$TOKENIZER_FILE" ] && [ -f "$TOKENIZER_FILE" ]; then
+    # Quick validation: check if file is readable and not empty
+    if [ -s "$TOKENIZER_FILE" ]; then
+        echo "✓ GroundingDINO tokenizer already exists, skipping setup check"
+    else
+        echo "Checking GroundingDINO setup..."
+        python "$SCRIPT_DIR/setup_groundingdino.py" || {
+            echo "WARNING: Failed to setup GroundingDINO tokenizer. Model may not load correctly."
+        }
+    fi
+else
+    echo "Checking GroundingDINO setup..."
+    python "$SCRIPT_DIR/setup_groundingdino.py" || {
+        echo "WARNING: Failed to setup GroundingDINO tokenizer. Model may not load correctly."
+    }
+fi
 
 # Default paths
 TILES_DIR="${1:-outputs/tiles}"
-LABELS_FILE="${2:-schemas/labels.txt}"
+LABELS_FILE="${2:-schemas/classes.txt}" # can be changed later for more detailed labels in the future!!
 
 # Check if tiles directory exists, if not try to find the most recent one
 if [ ! -d "$TILES_DIR" ]; then
@@ -129,9 +160,9 @@ fi
 
 if [ ! -f "$LABELS_FILE" ]; then
     echo "WARNING: Labels file '$LABELS_FILE' not found!"
-    echo "Trying alternative: schemas/labels.txt"
-    if [ -f "schemas/labels.txt" ]; then
-        LABELS_FILE="schemas/labels.txt"
+    echo "Trying alternative: schemas/classes.txt"
+    if [ -f "schemas/classes.txt" ]; then
+        LABELS_FILE="schemas/classes.txt"
     else
         echo "ERROR: No labels file found!"
         exit 1

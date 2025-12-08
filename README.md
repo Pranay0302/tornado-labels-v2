@@ -9,7 +9,7 @@ End-to-end labeling pipeline for tornado damage assessment from orthomosaics:
 - Tiles large images for fast viewing and processing
 - Uses **SAMGeo** to automatically propose damage polygons
 - Human-in-the-loop editing via **X-AnyLabeling** or any polygon tool
-- Exports **GeoPackage** (georeferenced) with 5 tornado-damage classes
+- Exports **GeoPackage** (georeferenced) with tornado damage classification labels
 
 ## Features
 
@@ -17,17 +17,37 @@ End-to-end labeling pipeline for tornado damage assessment from orthomosaics:
 - **AI-Powered Proposals**: Uses Segment Anything Model (SAM) to propose damage areas
 - **Human-in-the-Loop**: Edit and refine AI proposals with any labeling tool
 - **Georeferenced Output**: Final labels maintain spatial reference for GIS analysis
-- **5-Class System**: Categorizes damage from "No/Very Minor" to "Destroyed"
+- **Flexible Labeling Schema**: Currently using `schemas/classes.txt` (8 classes), with plans to migrate to `schemas/labels.txt` (60+ classes) for more detailed classification
 
-## Damage Classes
+## Labeling Schema
 
-| Class | Name | Color | Description |
-|-------|------|-------|-------------|
-| 0 | NoOrVeryMinor | Green | No visible damage or very minor damage |
-| 1 | Minor | Light Green | Minor damage, some visible effects |
-| 2 | Moderate | Yellow | Moderate damage, clear visible effects |
-| 3 | Severe | Orange | Severe damage, significant structural impact |
-| 4 | Destroyed | Red | Complete destruction or severe damage |
+### Current Schema: `schemas/classes.txt`
+
+The pipeline currently uses `schemas/classes.txt` which contains 8 damage classification labels:
+
+1. `Structural_Detailed_NoDamage`
+2. `Structural_Detailed_MinorDamage`
+3. `Structural_Detailed_ModerateDamage`
+4. `Structural_Detailed_MajorDamage`
+5. `Structural_Detailed_Destroyed`
+6. `Tree_Quick_NoDamage`
+7. `Tree_Quick_MinorDamage`
+8. `Tree_Quick_MajorDamage`
+
+This schema focuses on structural damage assessment with detailed structural classifications and quick tree damage assessment.
+
+### Future Schema: `schemas/labels.txt`
+
+The project will migrate to `schemas/labels.txt` which provides a more comprehensive classification system with 60+ labels, including:
+
+- **Structural**: Quick and detailed classifications (9 classes)
+- **Tree**: Quick and detailed classifications for hardwood/softwood with treefall and snapped attributes (17 classes)
+- **Vegetation**: Quick and detailed classifications for crops, grasses, and shrubs (13 classes)
+- **Vehicles**: Quick and detailed classifications including displacement types (5 classes)
+- **Debris**: Small and large debris classifications (2 classes)
+- **Land Cover**: Various land cover types (7 classes)
+
+The extended schema enables more granular damage assessment and will be integrated in future pipeline versions.
 
 ## Installation
 
@@ -136,12 +156,15 @@ tornado-labels/
 |   |       |-- proposals/
 |   |       |-- tiles/
 |   |       |-- work/
+|   |       |-- golden_set_training/  # Training tiles (optional)
 |   |       |-- pipeline_run_summary.json
 |   |       `-- requirements.lock
 |   `-- slurm_runs/
 |       `-- <timestamp>/
 |-- progress_updates*/             # Periodic notes or reports from me
 |-- schemas/
+|   |-- classes.txt               # Current label schema (8 classes) - used by pipeline
+|   |-- labels.txt                # Extended label schema (60+ classes) - future migration
 |   `-- labels_schema.json        # Label definitions for labeling tools
 |-- scripts/                      
 |   |-- run_pipeline.py
@@ -157,6 +180,8 @@ tornado-labels/
 |   `-- utils/
 |       |-- geo_utils.py
 |       `-- io_utils.py
+|-- run_anylabeling.sh            # Helper script to launch X-AnyLabeling with proper setup
+|-- setup_groundingdino.py        # Setup script for GroundingDINO tokenizer
 |-- environment.yml
 |-- requirements.txt
 |-- README.md
@@ -168,14 +193,40 @@ tornado-labels/
 ## Labeling Tools
 
 ### X-AnyLabeling (Recommended)
+
+The easiest way to launch X-AnyLabeling is using the provided `run_anylabeling.sh` script, which handles X11 forwarding setup, environment activation, and proper Qt configuration for remote connections.
+
+**Using the helper script (Recommended):**
+```bash
+# Basic usage - automatically finds the most recent tiles directory
+./run_anylabeling.sh
+
+# Specify tiles directory and labels file
+./run_anylabeling.sh outputs/<dataset>/<timestamp>_job<ID>/tiles schemas/classes.txt
+
+# The script uses schemas/classes.txt by default for labels
+```
+
+**Prerequisites:**
+- Connect to the server with X11 forwarding enabled:
+  ```bash
+  ssh -X <SSH-LOGIN-IDENTIFIER>
+  # OR (recommended for better performance):
+  ssh -YC <SSH-LOGIN-IDENTIFIER>
+  ```
+- Ensure you have a `.venv` directory with `x-anylabeling` installed
+
+**Manual launch (if needed):**
 ```bash
 pip install x-anylabeling
 
 # Launch with tiles and labels file
 # Note: x-anylabeling takes directory as positional argument
-# The labels file should contain one label per line
-x-anylabeling outputs/tiles --labels schemas/labels.txt
+# The labels file (schemas/classes.txt) contains one label per line
+x-anylabeling outputs/tiles --labels schemas/classes.txt
 ```
+
+**Current labeling schema:** The pipeline currently uses `schemas/classes.txt` (8 classes) for annotation. The extended `schemas/labels.txt` (60+ classes) will be integrated in future versions for more detailed classification.
 
 ### QGIS
 1. Open QGIS
@@ -192,27 +243,8 @@ The final output is a GeoPackage (`.gpkg`) file containing:
 - **Layer**: `tornado_damage_labels`
 - **Geometry**: Polygons in the original coordinate system
 - **Attributes**: 
-  - `label`: Damage class (0-4)
+  - `label`: Damage classification label (from `schemas/classes.txt` or `schemas/labels.txt`)
   - `confidence`: Optional confidence score
   - `tile`: Source tile name
   - `proposal_id`: Original proposal ID (if from SAM)
 
-
-## Advanced Usage
-
-### Custom Tile Parameters
-```bash
-# High overlap for better edge handling
-python3 scripts/run_pipeline.py data/orthomosaic.tif --tile-size 2048 --overlap 256
-
-# Small tiles for detailed work
-python3 scripts/run_pipeline.py data/orthomosaic.tif --tile-size 512 --overlap 32
-```
-
-### Batch Processing
-```bash
-# Process multiple orthomosaics
-for file in data/*.tif; do
-    python3 scripts/run_pipeline.py "$file" --output-gpkg "outputs/$(basename "$file" .tif)_labels.gpkg"
-done
-```

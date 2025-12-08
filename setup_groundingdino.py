@@ -2,6 +2,7 @@
 """
 Setup script to ensure GroundingDINO tokenizer file exists.
 This fixes the "No such file or directory" error when loading GroundingDINO models.
+Not important for now.
 """
 
 import os
@@ -17,7 +18,6 @@ def setup_groundingdino_tokenizer():
         print("Please install: pip install transformers tokenizers")
         return False
     
-    # Find the anylabeling package location
     try:
         import anylabeling
         anylabeling_path = Path(anylabeling.__file__).parent
@@ -25,17 +25,14 @@ def setup_groundingdino_tokenizer():
         print("ERROR: anylabeling package not found")
         return False
     
-    # Path to configs directory
     configs_dir = anylabeling_path / "services" / "auto_labeling" / "configs"
     tokenizer_file = configs_dir / "bert_base_uncased_tokenizer.json"
     
-    # Check if tokenizer file already exists
     if tokenizer_file.exists():
-        print(f"✓ Tokenizer file already exists: {tokenizer_file}")
-        # Verify it can be loaded
+        print(f" Tokenizer file already exists: {tokenizer_file}")
         try:
             Tokenizer.from_file(str(tokenizer_file))
-            print("✓ Tokenizer file is valid")
+            print(" Tokenizer file is valid")
             return True
         except Exception as e:
             print(f"⚠ Tokenizer file exists but is invalid: {e}")
@@ -49,11 +46,11 @@ def setup_groundingdino_tokenizer():
     try:
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         tokenizer.backend_tokenizer.save(str(tokenizer_file))
-        print(f"✓ Tokenizer file created: {tokenizer_file}")
+        print(f" Tokenizer file created: {tokenizer_file}")
         
         # Verify it can be loaded
         Tokenizer.from_file(str(tokenizer_file))
-        print("✓ Tokenizer file is valid and can be loaded")
+        print(" Tokenizer file is valid and can be loaded")
         return True
     except Exception as e:
         print(f"ERROR: Failed to create tokenizer file: {e}")
