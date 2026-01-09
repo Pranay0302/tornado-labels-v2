@@ -6,9 +6,11 @@ import argparse
 import json
 import math
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import rasterio
 from PIL import Image
 from rasterio.windows import Window
@@ -21,6 +23,37 @@ if str(REPO_ROOT) not in sys.path:
 from src.utils import ensure_directory, is_blank_tile
 
 
+def process_tile(
+    src_path: str | Path,
+    window: Window,
+    tile_name: str,
+    output_path: Path,
+    is_floating: bool,
+    nodata: float | None,
+) -> bool:
+    """Read a single window from the raster, check if it's blank, and save if not."""
+    with rasterio.open(src_path) as src:
+        image = src.read(window=window)
+
+    tile_array = image.transpose(1, 2, 0)
+    if tile_array.shape[2] >= 3:
+        tile_array = tile_array[:, :, :3]
+    elif tile_array.shape[2] == 1:
+        tile_array = tile_array.repeat(3, axis=2)
+
+    if is_floating:
+        if nodata is not None:
+            mask = np.isclose(tile_array, nodata)
+            tile_array[mask] = 0
+        tile_array = (np.clip(tile_array, 0, 1) * 255).astype(np.uint8)
+
+    if is_blank_tile(tile_array):
+        return False
+
+    Image.fromarray(tile_array).save(output_path / tile_name)
+    return True
+
+
 def tile_raster(
     input_tif: str | Path,
     output_dir: str | Path,
@@ -29,6 +62,7 @@ def tile_raster(
     overlap: int = 128,
     image_format: Literal["png", "jpg"] = "png",
     write_metadata: bool = True,
+    num_workers: int = 8,
 ) -> dict[str, int | str]:
     """Tile *input_tif* and write image tiles into *output_dir*.
 
@@ -44,41 +78,46 @@ def tile_raster(
     output_path = ensure_directory(output_dir)
     ext = ".jpg" if image_format.lower() == "jpg" else ".png"
 
-    skipped_count = 0
-    saved_count = 0
-
     with rasterio.open(input_tif) as src:
         width, height = src.width, src.height
+        is_floating = np.issubdtype(src.dtypes[0], np.floating)
+        nodata = src.nodata
         step = tile_size - overlap
         x_steps = math.ceil((width - overlap) / step)
         y_steps = math.ceil((height - overlap) / step)
 
-        print(f"Creating tiles: {x_steps}x{y_steps} = {x_steps * y_steps} total tiles")
+    print(f"Creating tiles: {x_steps}x{y_steps} = {x_steps * y_steps} total tiles")
 
-        for row in tqdm(range(y_steps), desc="Rows"):
-            for col in range(x_steps):
-                x0 = col * step
-                y0 = row * step
-                window_width = min(tile_size, width - x0)
-                window_height = min(tile_size, height - y0)
-                if window_width <= 0 or window_height <= 0:
-                    continue
+    tasks = []
+    for row in range(y_steps):
+        for col in range(x_steps):
+            x0 = col * step
+            y0 = row * step
+            window_width = min(tile_size, width - x0)
+            window_height = min(tile_size, height - y0)
+            if window_width <= 0 or window_height <= 0:
+                continue
 
-                window = Window(x0, y0, window_width, window_height)
-                image = src.read(window=window)
-                tile_array = image.transpose(1, 2, 0)
-                if tile_array.shape[2] >= 3:
-                    tile_array = tile_array[:, :, :3]
-                elif tile_array.shape[2] == 1:
-                    tile_array = tile_array.repeat(3, axis=2)
+            window = Window(x0, y0, window_width, window_height)
+            tile_name = f"tile_y{row:04d}_x{col:04d}{ext}"
+            tasks.append((window, tile_name))
 
-                if is_blank_tile(tile_array):
-                    skipped_count += 1
-                    continue
+    saved_count = 0
+    skipped_count = 0
 
-                tile_name = f"tile_y{row:04d}_x{col:04d}{ext}"
-                Image.fromarray(tile_array).save(output_path / tile_name)
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_to_tile = {
+            executor.submit(
+                process_tile, input_tif, window, tile_name, output_path, is_floating, nodata
+            ): tile_name
+            for window, tile_name in tasks
+        }
+
+        for future in tqdm(as_completed(future_to_tile), total=len(tasks), desc="Tiling"):
+            if future.result():
                 saved_count += 1
+            else:
+                skipped_count += 1
 
     metadata = {
         "input": str(Path(input_tif).resolve()),
@@ -111,6 +150,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Image format for saved tiles (default: png)",
     )
     parser.add_argument("--no-metadata", action="store_true", help="Do not write tiling metadata JSON")
+    parser.add_argument("--num-workers", type=int, default=8, help="Number of parallel workers (default: 8)")
     return parser
 
 
@@ -123,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         overlap=args.overlap,
         image_format=args.image_format,
         write_metadata=not args.no_metadata,
+        num_workers=args.num_workers,
     )
     print(json.dumps(metadata, indent=2))
     return 0
