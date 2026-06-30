@@ -3,18 +3,11 @@ channels:
   - conda-forge
 dependencies:
   - python=3.10
-  - gdal
   - rasterio
-  - fiona
-  - pyproj
-  - shapely
-  - geopandas
   - pillow
+  - numpy
   - pip
   - pip:
       - tqdm
-      - opencv-python
-      - matplotlib
-      - pycocotools
-      - segment-geospatial
-      - x-anylabeling
+      - roboflow
+      - python-dotenv

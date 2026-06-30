@@ -1,13 +1,10 @@
 __pycache__/
+.pytest_cache/
 *.pyc
 .env
 .DS_Store
 outputs/
-data/
-logs/
-progress_updates/
 .venv/
-*.outputs
-*.out
-run_pipeline.slurm
-data
+data/*
+!data/.gitkeep
+docs/

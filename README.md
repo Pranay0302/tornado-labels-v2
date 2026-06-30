@@ -2,9 +2,22 @@
 
 **Author:** Pranay Kumar Andra | **Advisor:** Dr. Melissa Wagner
 
-End-to-end pipeline for labeling tornado damage from orthomosaics. Accepts `.tev`/`.tif` inputs, tiles them, proposes damage polygons via SAM, and exports georeferenced GeoPackage labels after human review.
+Tiles a tornado-damage orthomosaic (`.tif`) into uniform image chips and uploads
+them to [Roboflow](https://app.roboflow.com) for **instance-segmentation**
+annotation and dataset management.
 
-![Pipeline overview](assets/pipeline_overview.png)
+```mermaid
+flowchart LR
+    A[orthomosaic.tif] --> B[tile_orthomosaic.py<br/>640px full tiles]
+    B --> C[roboflow_upload.py<br/>upload to Roboflow]
+    C --> D[Roboflow<br/>annotate · version · export]
+```
+
+One command does both steps:
+
+```bash
+python3 scripts/run_pipeline.py data/orthomosaic.tif
+```
 
 ---
 
@@ -12,68 +25,95 @@ End-to-end pipeline for labeling tornado damage from orthomosaics. Accepts `.tev
 
 ```bash
 git clone <repository-url>
-cd tornado-labels
+cd tornado-labels-v2
 conda env create -f environment.yml -n tornado-labels
 conda activate tornado-labels
 ```
 
-Create the data directory and add your orthomosaics:
+Or with pip: `pip install -r requirements.txt`.
+
+---
+
+## Setup: Roboflow key
+
+Copy the template and add your private API key (`.env` is gitignored):
 
 ```bash
-mkdir data   # place .tif or .tev orthomosaics here
+cp .env.example .env
+# edit .env  ->  ROBOFLOW_API_KEY=...
 ```
 
-If you plan to use X-AnyLabeling with GroundingDINO, run this once after activation:
+| Variable | Default | Purpose |
+|---|---|---|
+| `ROBOFLOW_API_KEY` | — | Your private Roboflow key (required to upload) |
+| `ROBOFLOW_WORKSPACE` | `tornado-ml` | Target workspace |
+
+If no key is set, tiling still runs and the upload is skipped with a warning.
+
+---
+
+## Usage
+
+Put your orthomosaic in `data/`, then run:
 
 ```bash
-python3 setup_groundingdino.py
+# tile + upload (recommended: dry-run first to check tile counts)
+python3 scripts/run_pipeline.py data/site-a.tif --rf-dry-run
+python3 scripts/run_pipeline.py data/site-a.tif
+```
+
+> **Big orthomosaic?** Tiling always saves the **full** set of chips to
+> `outputs/tiles/`. `--max-tiles` only limits how many are **uploaded** to
+> Roboflow — sampled randomly from across the whole image (not one corner) — so
+> you keep the complete local dataset but push just a test sample:
+>
+> ```bash
+> python3 scripts/run_pipeline.py data/site-a.tif --max-tiles 50 --sample-seed 0
+> ```
+
+Each run lands in Roboflow as:
+
+- **Project:** one per dataset, named after the input file (e.g. `site-a`),
+  created as an instance-segmentation project if it doesn't exist.
+- **Batch:** one per run, e.g. `site-a_20260630_142210`.
+
+### Options
+
+| Flag | Description |
+|---|---|
+| `--tile-size` / `--overlap` | Tile size / overlap in px (default `640` / `160`) |
+| `--tile-format` | `png` (default) or `jpg` |
+| `--max-tiles N` | Upload only N tiles (sampled randomly); all tiles still saved locally |
+| `--sample-seed` | Make `--max-tiles` upload sampling reproducible |
+| `--skip-roboflow` | Tile only, don't upload |
+| `--rf-dry-run` | Count tiles without uploading |
+| `--rf-project` / `--rf-workspace` / `--rf-batch` | Override the Roboflow target |
+| `--rf-project-type` | `instance-segmentation` (default) |
+
+Tiles are written to `outputs/tiles/` with a `tiling_metadata.json` and a
+`pipeline_run_summary.json` alongside.
+
+### Upload an existing tiles folder
+
+```bash
+python3 src/labeling/roboflow_upload.py outputs/tiles --project site-a
 ```
 
 ---
 
-## Quick Start
+## Tiling
 
-Place orthomosaics in `data/`, then submit via Slurm:
-
-```bash
-sbatch scripts/run_pipeline.slurm
-```
-
-Or check available options first:
-
-```bash
-python3 scripts/run_pipeline.py --help
-```
-
-Outputs go to `outputs/<dataset>/<timestamp>_job<ID>/` with a `pipeline_run_summary.json`.
-
----
-
-## Manual Workflow (Local / Debugging)
-
-```bash
-# 1. Convert to TIF (if needed)
-python3 src/labeling/convert_to_tif.py data/orthomosaic.tev data/
-
-# 2. Tile the orthomosaic (default: 400px tiles, 128px overlap)
-python3 src/labeling/tile_orthomosaic.py data/orthomosaic.tif outputs/tiles
-# Outputs: outputs/tiles/tile_y????_x????.png + tiling_metadata.json
-
-# 3. Generate SAM proposals (optional)
-python3 src/labeling/samgeo_propose.py outputs/tiles outputs/proposals
-
-# 4. Edit proposals with a labeling tool (X-AnyLabeling, QGIS, etc.)
-#    Save annotations as GeoJSON in outputs/edited/
-
-# 5. Merge annotations into final GeoPackage
-python3 src/labeling/merge_annotations.py data/orthomosaic.tif outputs/tiles outputs/edited outputs/labels.gpkg
-```
+- **640 px tiles, 160 px overlap** by default — large enough to keep whole
+  structures in one chip, which makes instance-segmentation masks clean.
+- **Full tiles only** (`--min-coverage 1.0`): partial edge tiles are dropped, so
+  every uploaded chip is exactly `tile_size × tile_size`.
+- Blank / near-uniform / mostly-nodata tiles are filtered out automatically.
 
 ---
 
 ## Labeling Schema
 
-Currently uses `schemas/classes.txt` (8 classes):
+Annotate polygons in Roboflow using the 8 classes in `schemas/classes.txt`:
 
 | Class | Description |
 |---|---|
@@ -86,127 +126,41 @@ Currently uses `schemas/classes.txt` (8 classes):
 | `Tree_Quick_MinorDamage` | Minor tree damage |
 | `Tree_Quick_MajorDamage` | Major tree damage |
 
-A more detailed schema (`schemas/labels.txt`, 60+ classes) covering structures, trees, vegetation, vehicles, debris, and land cover is planned for a future version.
-
----
-
-## Labeling Tool: X-AnyLabeling
-
-Connect with X11 forwarding, then:
-
-```bash
-# Recommended — auto-detects latest tiles directory
-./run_anylabeling.sh
-
-# Or specify paths explicitly
-./run_anylabeling.sh outputs/<dataset>/<timestamp>_job<ID>/tiles schemas/classes.txt
-```
-
-SSH with X11:
-```bash
-ssh -YC <SSH-LOGIN-IDENTIFIER>
-```
-
----
-
-## Roboflow: Dataset Upload & Annotation
-
-After tiling, upload the image chips to [Roboflow](https://app.roboflow.com) for annotation and dataset management.
-
-**1. Create a project**
-
-On `app.roboflow.com`, create a new project in the updated workspace.
-
-**2. Upload tiles**
-
-Via the web UI — drag and drop the contents of `outputs/<dataset>/<timestamp>_jobID/tiles/`.
-
-Or via the Python SDK:
-
-```bash
-pip install roboflow
-```
-
-```python
-from roboflow import Roboflow
-
-rf = Roboflow(api_key="YOUR_API_KEY")
-project = rf.workspace("YOUR_WORKSPACE").project("YOUR_PROJECT")
-project.upload("outputs/<dataset>/<timestamp>_jobID/tiles/")
-```
-
-**3. Annotate**
-
-Label polygons in Roboflow using the 8-class schema defined in `schemas/classes.txt`. Use the built-in smart polygon tool to speed up annotation or we can create classes directly on Roboflow.
-
-**4. Version & export**
-
-Generate a dataset version, apply augmentations as needed, then export in your target format (SAM3, YOLOv8, COCO JSON, etc.) for model training.
-
-> The Roboflow path is independent of the local X-AnyLabeling path - use whichever fits your workflow.
-
----
-
-## Output Format
-
-Final output is a GeoPackage (`.gpkg`) with layer `tornado_damage_labels`:
-
-- `label` — damage class
-- `confidence` — optional score
-- `tile` — source tile name
-- `proposal_id` — SAM proposal ID (if applicable)
+Use Roboflow's smart-polygon tool to speed up annotation, then generate a dataset
+version and export to YOLOv8-seg, COCO, SAM, etc.
 
 ---
 
 ## File Structure
 
-```
-tornado-labels/
-├── data/                         # Input orthomosaics
-├── outputs*/                     # Pipeline artefacts (auto-generated)
-│   └── <dataset>/<timestamp>_jobID>/
-│       ├── tiles/                #   image chips + tiling_metadata.json
-│       ├── proposals/            #   SAM-generated GeoJSONs
-│       ├── edited/               #   human-reviewed GeoJSONs
-│       ├── work/                 #   intermediate files (converted TIF, etc.)
-│       ├── labels.gpkg           #   final georeferenced output
-│       ├── requirements.lock     #   frozen env captured at run time
-│       └── pipeline_run_summary.json
+```text
+tornado-labels-v2/
+├── data/                         # Input orthomosaics (.tif; gitignored)
+├── outputs/                      # Tiles + metadata (auto-generated, gitignored)
 ├── schemas/
-│   ├── classes.txt               # Current label schema (8 classes)
-│   ├── labels.txt                # Extended schema (60+ classes, future)
-│   └── labels_schema.json
+│   └── classes.txt               # 8-class instance-segmentation schema
 ├── scripts/
-│   ├── run_pipeline.py
-│   ├── run_pipeline.slurm
-│   ├── submit_pipeline_jobs.py
-│   └── verify_pipeline_outputs.py
+│   └── run_pipeline.py           # tile + upload entry point
 ├── src/
 │   ├── labeling/
-│   │   ├── convert_to_tif.py
-│   │   ├── merge_annotations.py
-│   │   ├── samgeo_propose.py
-│   │   └── tile_orthomosaic.py
+│   │   ├── tile_orthomosaic.py   # tiling
+│   │   └── roboflow_upload.py    # Roboflow upload
 │   └── utils/
-│       ├── geo_utils.py
-│       └── io_utils.py
-├── run_anylabeling.sh
-├── setup_groundingdino.py
+│       ├── image_utils.py        # blank-tile detection
+│       └── io_utils.py           # filesystem helpers
+├── tests/
+├── .env.example                  # Roboflow credentials template
 ├── environment.yml
 └── requirements.txt
 ```
 
-> `*` = gitignored
-
 ---
 
-## Recent Changes
+## Testing
 
-### Mar 2026 — Tiling overhaul
-- **Parallel tiling** — `tile_orthomosaic.py` now uses `ThreadPoolExecutor` (8 workers by default) for faster tile extraction.
-- **Multi-stage quality filter** — tiles are filtered in order (cheapest check first) before being saved:
-  1. **Min coverage** (`--min-coverage 0.25`) — skips edge tiles smaller than 25% of the target area
-  2. **Nodata fraction** (`--max-nodata-fraction 0.5`) — skips tiles with >50% masked/nodata pixels
-  3. **Blank detection** (`--blank-threshold 0.95`, `--variance-threshold 1e-4`) — skips near-uniform, all-white, or all-black tiles; optional Laplacian sharpness filter (`--sharpness-threshold`, disabled by default)
-- **Tiling metadata** — `tiling_metadata.json` is written to the tiles directory with counts, parameters, and filter settings; used downstream by `merge_annotations.py` to recover tile origins.
+```bash
+python3 -m pytest tests/ -v
+```
 
+Tests cover tiling (big/full-only) and the Roboflow upload (dry-run + mocked SDK);
+no live API key or network access is required.

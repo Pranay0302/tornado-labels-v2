@@ -31,12 +31,12 @@ def process_tile(
     is_floating: bool,
     nodata: float | None,
     *,
-    tile_size: int = 400,
+    tile_size: int = 640,
     blank_threshold: float = 0.95,
     variance_threshold: float = 1e-4,
     sharpness_threshold: float = 0.0,
     max_nodata_fraction: float = 0.5,
-    min_coverage: float = 0.25,
+    min_coverage: float = 1.0,
 ) -> bool:
     """Read a single window from the raster, apply quality filters, and save if it passes.
 
@@ -99,8 +99,8 @@ def tile_raster(
     input_tif: str | Path,
     output_dir: str | Path,
     *,
-    tile_size: int = 400,
-    overlap: int = 128,
+    tile_size: int = 640,
+    overlap: int = 160,
     image_format: Literal["png", "jpg"] = "png",
     write_metadata: bool = True,
     num_workers: int = 8,
@@ -109,7 +109,7 @@ def tile_raster(
     variance_threshold: float = 1e-4,
     sharpness_threshold: float = 0.0,
     max_nodata_fraction: float = 0.5,
-    min_coverage: float = 0.25,
+    min_coverage: float = 1.0,
 ) -> dict[str, int | str]:
     """Tile *input_tif* and write image tiles into *output_dir*.
 
@@ -128,7 +128,8 @@ def tile_raster(
         Tiles with more than this fraction of nodata pixels are skipped.
     min_coverage:
         Tiles whose area is less than this fraction of ``tile_size²`` are
-        skipped (catches tiny edge slivers).
+        skipped. Defaults to ``1.0`` so only full ``tile_size × tile_size``
+        tiles are kept and partial edge tiles are dropped.
     """
 
     if tile_size <= 0:
@@ -166,6 +167,15 @@ def tile_raster(
     saved_count = 0
     skipped_count = 0
 
+    filter_kwargs = dict(
+        tile_size=tile_size,
+        blank_threshold=blank_threshold,
+        variance_threshold=variance_threshold,
+        sharpness_threshold=sharpness_threshold,
+        max_nodata_fraction=max_nodata_fraction,
+        min_coverage=min_coverage,
+    )
+
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         future_to_tile = {
             executor.submit(
@@ -176,12 +186,7 @@ def tile_raster(
                 output_path,
                 is_floating,
                 nodata,
-                tile_size=tile_size,
-                blank_threshold=blank_threshold,
-                variance_threshold=variance_threshold,
-                sharpness_threshold=sharpness_threshold,
-                max_nodata_fraction=max_nodata_fraction,
-                min_coverage=min_coverage,
+                **filter_kwargs,
             ): tile_name
             for window, tile_name in tasks
         }
@@ -221,8 +226,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Tile an orthomosaic into square image chips")
     parser.add_argument("input_tif", help="Source GeoTIFF to tile")
     parser.add_argument("output_dir", help="Directory where image tiles will be stored")
-    parser.add_argument("--tile-size", type=int, default=400, help="Tile size in pixels (default: 400)")
-    parser.add_argument("--overlap", type=int, default=128, help="Overlap between tiles in pixels (default: 128)")
+    parser.add_argument("--tile-size", type=int, default=640, help="Tile size in pixels (default: 640)")
+    parser.add_argument("--overlap", type=int, default=160, help="Overlap between tiles in pixels (default: 160)")
     parser.add_argument(
         "--image-format",
         choices=["png", "jpg"],
@@ -264,9 +269,9 @@ def _build_parser() -> argparse.ArgumentParser:
     qf.add_argument(
         "--min-coverage",
         type=float,
-        default=0.25,
+        default=1.0,
         metavar="FRAC",
-        help="Skip edge tiles whose area is less than this fraction of tile_size² (default: 0.25)",
+        help="Skip edge tiles smaller than this fraction of tile_size²; 1.0 keeps only full tiles (default: 1.0)",
     )
     return parser
 
