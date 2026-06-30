@@ -23,6 +23,13 @@ def test_slugify():
     assert rfu.slugify("   ") == "dataset"
 
 
+def test_project_slug_must_start_with_letter():
+    # Roboflow 404s on digit-leading project slugs -> prefix them.
+    assert rfu.project_slug("2025_06_20_Enderlin_ND") == "tornado-2025-06-20-enderlin-nd"
+    # letter-leading names are left untouched
+    assert rfu.project_slug("Site A") == "site-a"
+
+
 def test_make_batch_name_format():
     ts = datetime(2026, 6, 30, 14, 22, 10)
     assert rfu.make_batch_name("Site A", ts) == "site-a_20260630_142210"
@@ -88,6 +95,7 @@ class _FakeWorkspace:
             "annotation": annotation,
         }
         self._project = _FakeProject()
+        return self._project  # SDK returns the new Project; get_or_create uses it
 
 
 def test_upload_tiles_mocked_sdk(tmp_path, monkeypatch):

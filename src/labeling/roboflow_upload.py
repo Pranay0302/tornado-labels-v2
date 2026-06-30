@@ -11,9 +11,22 @@ from datetime import datetime
 from pathlib import Path
 
 try:  # optional dependency; only needed when actually uploading
-    from dotenv import load_dotenv
+    from dotenv import find_dotenv
+    from dotenv import load_dotenv as _load_dotenv
+
+    def load_dotenv() -> bool:
+        """Load ``.env`` from the working-directory tree, robustly.
+
+        Uses ``find_dotenv(usecwd=True)`` so it doesn't rely on dotenv's
+        call-stack walking, which raises in some contexts (e.g. ``python -c``
+        or stdin). Any failure degrades to "no .env loaded".
+        """
+        try:
+            return _load_dotenv(find_dotenv(usecwd=True))
+        except Exception:
+            return False
 except ModuleNotFoundError:  # pragma: no cover - dotenv is a declared dep
-    def load_dotenv(*_args, **_kwargs) -> bool:
+    def load_dotenv() -> bool:
         return False
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
@@ -23,6 +36,19 @@ def slugify(name: str) -> str:
     """Lowercase, hyphenated, Roboflow-safe identifier."""
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", str(name).strip().lower())
     return slug.strip("-") or "dataset"
+
+
+def project_slug(name: str) -> str:
+    """Roboflow project id: slugified and guaranteed to start with a letter.
+
+    Roboflow stores but cannot serve (HTTP 404) projects whose slug starts with
+    a digit, so a name derived from a date-leading filename (e.g.
+    ``2025_06_20_...``) is prefixed with ``tornado-`` to make it retrievable.
+    """
+    slug = slugify(name)
+    if not slug[0].isalpha():
+        slug = f"tornado-{slug}"
+    return slug
 
 
 def make_batch_name(dataset: str, timestamp: datetime | None = None) -> str:
@@ -65,17 +91,21 @@ def get_or_create_project(
     license: str = "Private",
     annotation_group: str = "tornado-damage",
 ):
-    """Return the project, creating an instance-segmentation project if missing."""
+    """Return the project, creating an instance-segmentation project if missing.
+
+    Uses the ``Project`` returned by ``create_project`` directly rather than
+    re-querying by slug — re-querying immediately after creation is both
+    unnecessary and racy.
+    """
     try:
         return workspace.project(project_id)
     except Exception:
-        workspace.create_project(
+        return workspace.create_project(
             project_name=project_id,
             project_type=project_type,
             project_license=license,
             annotation=annotation_group,
         )
-        return workspace.project(project_id)
 
 
 def _list_tiles(tiles_dir: Path) -> list[Path]:
@@ -124,7 +154,7 @@ def upload_tiles(
         "dry_run": dry_run,
         "skipped": False,
         "workspace": ws_name,
-        "project": slugify(project),
+        "project": project_slug(project),
         "batch": batch,
         "tiles_found": len(images),
         "selected": len(to_upload),
@@ -152,7 +182,7 @@ def upload_tiles(
         return summary
 
     ws = _get_workspace(key, ws_name)
-    proj = get_or_create_project(ws, slugify(project), project_type=project_type)
+    proj = get_or_create_project(ws, project_slug(project), project_type=project_type)
 
     for image in to_upload:
         try:
