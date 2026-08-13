@@ -7,6 +7,8 @@ import json
 import os
 import random
 import re
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -112,6 +114,110 @@ def _list_tiles(tiles_dir: Path) -> list[Path]:
     return sorted(p for p in tiles_dir.glob("*") if p.suffix.lower() in IMAGE_SUFFIXES)
 
 
+def _format_eta(seconds: float) -> str:
+    """Human ETA: ``M:SS`` (or ``H:MM:SS`` past an hour)."""
+    total = int(max(seconds, 0))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+class _NullProgress:
+    """No-op reporter used when progress is disabled or there is nothing to do."""
+
+    def update(self, failed: int) -> None:  # noqa: D401 - trivial
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class _TqdmProgress:
+    """Live ``tqdm`` bar for interactive terminals."""
+
+    def __init__(self, total: int, desc: str) -> None:
+        from tqdm import tqdm
+
+        self._bar = tqdm(total=total, desc=desc, unit="tile")
+        self._failed = 0
+
+    def update(self, failed: int) -> None:
+        if failed != self._failed:
+            self._failed = failed
+            self._bar.set_postfix(failed=failed, refresh=False)
+        self._bar.update(1)
+
+    def close(self) -> None:
+        self._bar.close()
+
+
+class _LogProgress:
+    """Throttled plain-text progress for non-TTY output (e.g. SLURM logs).
+
+    Emits at most one line every *interval* seconds during the run, plus a
+    guaranteed final line on :meth:`close`. The clock and interval are
+    injectable so throttling is deterministically testable.
+    """
+
+    def __init__(
+        self,
+        total: int,
+        desc: str,
+        *,
+        interval: float = 30.0,
+        clock=time.monotonic,
+        out=None,
+    ) -> None:
+        self._total = total
+        self._desc = desc
+        self._interval = interval
+        self._clock = clock
+        self._out = out if out is not None else sys.stdout
+        self._done = 0
+        self._failed = 0
+        self._start = clock()
+        self._last_emit = self._start
+
+    def _emit(self) -> None:
+        elapsed = max(self._clock() - self._start, 1e-9)
+        rate = self._done / elapsed
+        pct = (self._done / self._total * 100) if self._total else 100.0
+        if rate > 0 and self._done < self._total:
+            eta = _format_eta((self._total - self._done) / rate)
+        else:
+            eta = "0:00"
+        print(
+            f"{self._desc}: {pct:3.0f}%  {self._done}/{self._total}  "
+            f"{rate:.1f} tile/s  ETA {eta}  failed={self._failed}",
+            file=self._out,
+            flush=True,
+        )
+        self._last_emit = self._clock()
+
+    def update(self, failed: int) -> None:
+        self._done += 1
+        self._failed = failed
+        if self._clock() - self._last_emit >= self._interval:
+            self._emit()
+
+    def close(self) -> None:
+        self._emit()
+
+
+def _make_progress(total: int, desc: str, *, show: bool):
+    """Pick a progress backend: tqdm for a TTY, plain log lines otherwise."""
+    if not show or total <= 0:
+        return _NullProgress()
+    if sys.stderr.isatty():
+        try:
+            return _TqdmProgress(total, desc)
+        except Exception:  # tqdm import/init trouble -> degrade, never block upload
+            return _LogProgress(total, desc)
+    return _LogProgress(total, desc)
+
+
 def upload_tiles(
     tiles_dir: str | Path,
     *,
@@ -126,6 +232,7 @@ def upload_tiles(
     num_retry: int = 3,
     max_tiles: int | None = None,
     sample_seed: int | None = None,
+    show_progress: bool = True,
 ) -> dict:
     """Upload image chips from *tiles_dir* into a named Roboflow batch.
 
@@ -184,6 +291,9 @@ def upload_tiles(
     ws = _get_workspace(key, ws_name)
     proj = get_or_create_project(ws, project_slug(project), project_type=project_type)
 
+    progress = _make_progress(
+        len(to_upload), f"Uploading {summary['project']}", show=show_progress
+    )
     for image in to_upload:
         try:
             proj.upload(
@@ -196,6 +306,8 @@ def upload_tiles(
         except Exception as exc:  # collect, keep going
             summary["failed"] += 1
             summary["failures"].append({"file": image.name, "error": str(exc)})
+        progress.update(summary["failed"])
+    progress.close()
 
     summary["executed"] = True
     return summary
@@ -225,6 +337,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="SEED",
         help="Seed for --max-tiles sampling (default: non-deterministic)",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Disable the upload progress bar / progress log lines",
+    )
     return parser
 
 
@@ -243,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             max_tiles=args.max_tiles,
             sample_seed=args.sample_seed,
+            show_progress=not args.quiet,
         )
     except ModuleNotFoundError:
         print("ERROR: the 'roboflow' package is required. Install it: pip install roboflow")
