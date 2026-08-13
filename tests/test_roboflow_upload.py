@@ -103,7 +103,7 @@ def test_upload_tiles_mocked_sdk(tmp_path, monkeypatch):
     ws = _FakeWorkspace(exists=False)
     monkeypatch.setattr(rfu, "resolve_api_key", lambda *a, **k: "key")
     monkeypatch.setattr(rfu, "_get_workspace", lambda *a, **k: ws)
-    summary = rfu.upload_tiles(tmp_path, project="Site A", batch_name="b1")
+    summary = rfu.upload_tiles(tmp_path, project="Site A", batch_name="b1", show_progress=False)
     assert ws.created["type"] == "instance-segmentation"  # auto-created
     assert ws.created["name"] == "site-a"
     assert summary["uploaded"] == 2
@@ -149,9 +149,100 @@ def test_upload_tiles_max_tiles_reproducible(tmp_path, monkeypatch):
     def run(seed):
         ws = _WS()
         monkeypatch.setattr(rfu, "_get_workspace", lambda *a, **k: ws)
-        rfu.upload_tiles(tmp_path, project="site-a", batch_name="b", max_tiles=4, sample_seed=seed)
+        rfu.upload_tiles(
+            tmp_path, project="site-a", batch_name="b", max_tiles=4, sample_seed=seed,
+            show_progress=False,
+        )
         return sorted(ws._p.paths)
 
     first, second = run(7), run(7)
     assert first == second  # same seed -> same uploaded tiles
     assert len(first) == 4
+
+
+class _Clock:
+    """Manually advanced monotonic clock for deterministic throttle tests."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_format_eta():
+    assert rfu._format_eta(30) == "0:30"
+    assert rfu._format_eta(90) == "1:30"
+    assert rfu._format_eta(3725) == "1:02:05"
+    assert rfu._format_eta(-5) == "0:00"  # never negative
+
+
+def test_log_progress_throttle_and_final_line():
+    import io
+
+    clock = _Clock()
+    out = io.StringIO()
+    p = rfu._LogProgress(total=5, desc="Uploading site-a", interval=30.0, clock=clock, out=out)
+
+    clock.t = 10; p.update(0)   # 10s since start -> under interval, no emit
+    clock.t = 20; p.update(0)   # still under interval
+    assert out.getvalue() == ""  # nothing emitted yet
+
+    clock.t = 45; p.update(0)   # 45s >= 30s -> emit
+    mid = out.getvalue()
+    assert "3/5" in mid
+    assert "60%" in mid
+
+    p.close()                    # close always emits a final line
+    lines = out.getvalue().strip().splitlines()
+    assert len(lines) == 2       # one throttled + one final
+
+
+def test_log_progress_line_format():
+    import io
+
+    clock = _Clock()
+    out = io.StringIO()
+    # total=10, 4 tiles done in 2s -> rate 2.0 tile/s, 6 left -> ETA 0:03.
+    # Numbers chosen so rate/ETA are exact in float (no fragile rounding).
+    p = rfu._LogProgress(total=10, desc="Uploading site-a", interval=30.0, clock=clock, out=out)
+    clock.t = 2.0
+    for _ in range(4):
+        p.update(2)  # all under the 30s interval -> no mid-run emit
+    p.close()        # final line reflects done=4, failed=2, elapsed=2s
+    line = out.getvalue().strip().splitlines()[-1]
+    assert line.startswith("Uploading site-a:")
+    assert "40%" in line
+    assert "4/10" in line
+    assert "2.0 tile/s" in line
+    assert "ETA 0:03" in line
+    assert "failed=2" in line
+
+
+class _RecordProgress:
+    def __init__(self):
+        self.updates = []
+        self.closed = 0
+
+    def update(self, failed):
+        self.updates.append(failed)
+
+    def close(self):
+        self.closed += 1
+
+
+def test_upload_reports_progress_per_tile(tmp_path, monkeypatch):
+    _make_tiles(tmp_path, 3)  # x0000 ok, x0001 fails, x0002 ok
+    ws = _FakeWorkspace(exists=True)
+    rec = _RecordProgress()
+    monkeypatch.setattr(rfu, "resolve_api_key", lambda *a, **k: "key")
+    monkeypatch.setattr(rfu, "_get_workspace", lambda *a, **k: ws)
+    monkeypatch.setattr(rfu, "_make_progress", lambda *a, **k: rec)
+    rfu.upload_tiles(tmp_path, project="site-a", batch_name="b1")
+    assert rec.updates == [0, 1, 1]  # cumulative failed count, one call per tile
+    assert rec.closed == 1
+
+
+def test_make_progress_disabled_and_empty():
+    assert isinstance(rfu._make_progress(0, "x", show=True), rfu._NullProgress)
+    assert isinstance(rfu._make_progress(5, "x", show=False), rfu._NullProgress)
