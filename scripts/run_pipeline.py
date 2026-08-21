@@ -99,10 +99,14 @@ def main(argv: list[str] | None = None) -> int:
         overlap=args.overlap,
         image_format=args.tile_format,
     )
+    geojson_index = tile_metadata.get("geojson_index")
     summary["stages"]["tile"] = {
         "executed": True,
         "metadata": tile_metadata,
         "metadata_file": str((Path(args.tiles_dir) / "tiling_metadata.json").resolve()),
+        "geojson_index_file": (
+            str((Path(args.tiles_dir) / geojson_index).resolve()) if geojson_index else None
+        ),
     }
 
     if not args.skip_roboflow:

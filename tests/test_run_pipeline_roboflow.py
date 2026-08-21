@@ -79,6 +79,22 @@ def test_pipeline_max_tiles_caps_upload_only(tmp_path):
     assert stage["uploaded"] == 3
 
 
+def test_pipeline_summary_points_at_geojson_index(tmp_path):
+    tif = tmp_path / "site-a.tif"
+    _make_tif(tif)
+    tiles_dir = tmp_path / "run" / "tiles"
+    rc = run_pipeline.main([
+        str(tif), "--skip-roboflow",
+        "--tile-size", "200", "--overlap", "0",
+        "--tiles-dir", str(tiles_dir),
+    ])
+    assert rc == 0
+    tile_stage = _summary(tiles_dir)["stages"]["tile"]
+    geojson_file = Path(tile_stage["geojson_index_file"])
+    assert geojson_file == (tiles_dir / "tiles_index.geojson").resolve()
+    assert geojson_file.exists()
+
+
 def test_pipeline_rejects_non_tif(tmp_path):
     bad = tmp_path / "image.png"
     bad.write_bytes(b"x")

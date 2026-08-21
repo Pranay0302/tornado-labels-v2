@@ -13,7 +13,10 @@ from typing import Literal
 import numpy as np
 import rasterio
 from PIL import Image
+from rasterio.warp import transform_geom
 from rasterio.windows import Window
+from rasterio.windows import bounds as window_bounds
+from rasterio.windows import transform as window_transform
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -95,6 +98,90 @@ def process_tile(
     return True
 
 
+def _affine_to_list(transform) -> list[float]:
+    """Serialise a rasterio/affine ``Affine`` as ``[a, b, c, d, e, f]``.
+
+    This is affine order (``x = a·col + b·row + c``, ``y = d·col + e·row + f``);
+    ``(c, f)`` is the top-left corner. It matches ``list(Affine)[:6]`` and lets a
+    consumer rebuild the transform with ``rasterio.Affine(*values)``.
+    """
+    return [transform.a, transform.b, transform.c, transform.d, transform.e, transform.f]
+
+
+def _tile_feature(window: Window, tile_name: str, row: int, col: int, src_transform, src_crs) -> dict:
+    """Build one GeoJSON ``Feature`` describing a single saved tile.
+
+    The footprint polygon is reprojected to WGS84 (lon/lat) when the source has a
+    CRS so the index opens correctly in any GIS / web map; the native-CRS pixel
+    ``window``, per-tile ``transform`` and ``bounds`` needed to reassemble the
+    tiles later are carried in ``properties``.
+    """
+    tile_transform = window_transform(window, src_transform)
+    left, bottom, right, top = window_bounds(window, src_transform)
+
+    # Counter-clockwise, closed exterior ring in the source CRS.
+    ring = [[left, bottom], [right, bottom], [right, top], [left, top], [left, bottom]]
+    geometry: dict = {"type": "Polygon", "coordinates": [ring]}
+    if src_crs is not None:
+        geometry = transform_geom(src_crs, "EPSG:4326", geometry)
+
+    return {
+        "type": "Feature",
+        "geometry": geometry,
+        "properties": {
+            "name": tile_name,
+            "row": row,
+            "col": col,
+            "window": [int(window.col_off), int(window.row_off), int(window.width), int(window.height)],
+            "transform": _affine_to_list(tile_transform),
+            "bounds": [left, bottom, right, top],
+        },
+    }
+
+
+def _build_tile_index(
+    saved_entries: list[tuple[Window, str, int, int]],
+    *,
+    source: str | Path,
+    src_crs,
+    src_transform,
+    width: int,
+    height: int,
+    tile_size: int,
+    overlap: int,
+    image_format: str,
+    saved_count: int,
+    skipped_count: int,
+) -> dict:
+    """Assemble the GeoJSON ``FeatureCollection`` tile index.
+
+    The ``metadata`` header carries the source georeferencing; combined with each
+    feature's pixel ``window`` it is sufficient to reconstruct every tile's exact
+    position, which is what makes a later merge possible.
+    """
+    features = [
+        _tile_feature(window, name, row, col, src_transform, src_crs)
+        for window, name, row, col in saved_entries
+    ]
+    return {
+        "type": "FeatureCollection",
+        "metadata": {
+            "source": str(Path(source).resolve()),
+            "source_crs": src_crs.to_string() if src_crs is not None else None,
+            "source_transform": _affine_to_list(src_transform),
+            "width": width,
+            "height": height,
+            "tile_size": tile_size,
+            "overlap": overlap,
+            "image_format": image_format,
+            "geometry_crs": "EPSG:4326" if src_crs is not None else None,
+            "saved_tiles": saved_count,
+            "skipped_tiles": skipped_count,
+        },
+        "features": features,
+    }
+
+
 def tile_raster(
     input_tif: str | Path,
     output_dir: str | Path,
@@ -103,6 +190,7 @@ def tile_raster(
     overlap: int = 160,
     image_format: Literal["png", "jpg"] = "png",
     write_metadata: bool = True,
+    write_geojson: bool = True,
     num_workers: int = 8,
     # Quality-filter parameters forwarded to process_tile / is_blank_tile.
     blank_threshold: float = 0.95,
@@ -144,6 +232,8 @@ def tile_raster(
         width, height = src.width, src.height
         is_floating = np.issubdtype(src.dtypes[0], np.floating)
         nodata = src.nodata
+        src_crs = src.crs
+        src_transform = src.transform
         step = tile_size - overlap
         x_steps = math.ceil((width - overlap) / step)
         y_steps = math.ceil((height - overlap) / step)
@@ -162,10 +252,11 @@ def tile_raster(
 
             window = Window(x0, y0, window_width, window_height)
             tile_name = f"tile_y{row:04d}_x{col:04d}{ext}"
-            tasks.append((window, tile_name))
+            tasks.append((window, tile_name, row, col))
 
     saved_count = 0
     skipped_count = 0
+    saved_entries: list[tuple[Window, str, int, int]] = []
 
     filter_kwargs = dict(
         tile_size=tile_size,
@@ -177,7 +268,7 @@ def tile_raster(
     )
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        future_to_tile = {
+        future_to_task = {
             executor.submit(
                 process_tile,
                 input_tif,
@@ -187,23 +278,52 @@ def tile_raster(
                 is_floating,
                 nodata,
                 **filter_kwargs,
-            ): tile_name
-            for window, tile_name in tasks
+            ): (window, tile_name, row, col)
+            for window, tile_name, row, col in tasks
         }
 
-        for future in tqdm(as_completed(future_to_tile), total=len(tasks), desc="Tiling"):
+        for future in tqdm(as_completed(future_to_task), total=len(tasks), desc="Tiling"):
+            window, tile_name, row, col = future_to_task[future]
             if future.result():
                 saved_count += 1
+                saved_entries.append((window, tile_name, row, col))
             else:
                 skipped_count += 1
+
+    # Deterministic top-to-bottom, left-to-right ordering of the index.
+    saved_entries.sort(key=lambda entry: (entry[2], entry[3]))
+
+    # Georeferenced tile index: per-tile footprints + pixel windows so the tiles
+    # can be reassembled into a georeferenced mosaic later if wanted.
+    geojson_index: str | None = None
+    if write_geojson:
+        index = _build_tile_index(
+            saved_entries,
+            source=input_tif,
+            src_crs=src_crs,
+            src_transform=src_transform,
+            width=width,
+            height=height,
+            tile_size=tile_size,
+            overlap=overlap,
+            image_format=image_format.lower(),
+            saved_count=saved_count,
+            skipped_count=skipped_count,
+        )
+        geojson_name = "tiles_index.geojson"
+        (output_path / geojson_name).write_text(json.dumps(index, indent=2), encoding="utf-8")
+        geojson_index = geojson_name
 
     metadata = {
         "input": str(Path(input_tif).resolve()),
         "tile_size": tile_size,
         "overlap": overlap,
         "image_format": image_format.lower(),
+        "crs": src_crs.to_string() if src_crs is not None else None,
+        "source_transform": _affine_to_list(src_transform),
         "saved_tiles": saved_count,
         "skipped_tiles": skipped_count,
+        "geojson_index": geojson_index,
         "filter": {
             "blank_threshold": blank_threshold,
             "variance_threshold": variance_threshold,
@@ -235,6 +355,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Image format for saved tiles (default: png)",
     )
     parser.add_argument("--no-metadata", action="store_true", help="Do not write tiling metadata JSON")
+    parser.add_argument(
+        "--no-geojson",
+        action="store_true",
+        help="Do not write the georeferenced tiles_index.geojson tile index",
+    )
     parser.add_argument("--num-workers", type=int, default=8, help="Number of parallel workers (default: 8)")
 
     qf = parser.add_argument_group("quality filters")
@@ -285,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
         overlap=args.overlap,
         image_format=args.image_format,
         write_metadata=not args.no_metadata,
+        write_geojson=not args.no_geojson,
         num_workers=args.num_workers,
         blank_threshold=args.blank_threshold,
         variance_threshold=args.variance_threshold,

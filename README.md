@@ -90,8 +90,8 @@ Each run lands in Roboflow as:
 | `--rf-project` / `--rf-workspace` / `--rf-batch` | Override the Roboflow target |
 | `--rf-project-type` | `instance-segmentation` (default) |
 
-Tiles are written to `outputs/tiles/` with a `tiling_metadata.json` and a
-`pipeline_run_summary.json` alongside.
+Tiles are written to `outputs/tiles/` with a `tiling_metadata.json`, a
+georeferenced `tiles_index.geojson`, and a `pipeline_run_summary.json` alongside.
 
 ### Upload an existing tiles folder
 
@@ -108,6 +108,12 @@ python3 src/labeling/roboflow_upload.py outputs/tiles --project site-a
 - **Full tiles only** (`--min-coverage 1.0`): partial edge tiles are dropped, so
   every uploaded chip is exactly `tile_size × tile_size`.
 - Blank / near-uniform / mostly-nodata tiles are filtered out automatically.
+- **Geotagged for re-merging.** Every run writes `tiles_index.geojson` next to the
+  tiles: a `FeatureCollection` with one WGS84 footprint per saved tile, carrying
+  its pixel `window`, per-tile affine `transform`, and native `bounds`, plus the
+  source CRS/transform in the header. That's enough to reassemble the tiles into a
+  georeferenced mosaic later, and the footprints load directly as a layer in QGIS.
+  (Disable with `--no-geojson` on `tile_orthomosaic.py`.)
 
 ---
 
