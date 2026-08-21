@@ -114,6 +114,18 @@ python3 src/labeling/roboflow_upload.py outputs/tiles --project site-a
   source CRS/transform in the header. That's enough to reassemble the tiles into a
   georeferenced mosaic later, and the footprints load directly as a layer in QGIS.
   (Disable with `--no-geojson` on `tile_orthomosaic.py`.)
+- **Optional CHM / NDVI stats.** Pass `--chm PATH` and/or `--ndvi PATH` to
+  `tile_orthomosaic.py` to sample each tile's footprint from the height / vegetation
+  rasters (matched by geography, so differing resolutions are fine) and add per-tile
+  `chm_mean/chm_max/chm_p95/chm_valid_frac` and `ndvi_mean/ndvi_veg_frac` to the
+  GeoJSON — handy for filtering tiles (e.g. skip open fields, prioritise structures)
+  or routing tree vs structural damage. `--ndvi-veg-threshold` sets the vegetation
+  cut (default `0.3`).
+
+  ```bash
+  python3 src/labeling/tile_orthomosaic.py site_ortho.tif outputs/tiles \
+    --chm site_CHM.tif --ndvi site_NDVI.tif
+  ```
 
 ---
 

@@ -13,9 +13,10 @@ from typing import Literal
 import numpy as np
 import rasterio
 from PIL import Image
-from rasterio.warp import transform_geom
+from rasterio.warp import transform_bounds, transform_geom
 from rasterio.windows import Window
 from rasterio.windows import bounds as window_bounds
+from rasterio.windows import from_bounds as window_from_bounds
 from rasterio.windows import transform as window_transform
 from tqdm import tqdm
 
@@ -182,6 +183,117 @@ def _build_tile_index(
     }
 
 
+def _read_valid_values(dataset, bounds: list[float], bounds_crs) -> tuple[np.ndarray, int]:
+    """Read band-1 pixels of *dataset* inside geographic *bounds*.
+
+    *bounds* is ``[left, bottom, right, top]`` in *bounds_crs* (the tile/source
+    CRS); it is reprojected to the dataset CRS when they differ, so a CHM/NDVI on
+    a different grid or resolution is sampled by geography, not pixel index.
+
+    Returns ``(valid_values, total_pixels_read)`` where nodata / non-finite pixels
+    are removed from ``valid_values`` but still counted in ``total_pixels_read``.
+    Any non-overlap or read error yields ``(empty, 0)`` rather than raising.
+    """
+    left, bottom, right, top = bounds
+    ds_crs = dataset.crs
+    if bounds_crs is not None and ds_crs is not None and bounds_crs != ds_crs:
+        left, bottom, right, top = transform_bounds(bounds_crs, ds_crs, left, bottom, right, top)
+
+    try:
+        win = window_from_bounds(left, bottom, right, top, dataset.transform)
+    except Exception:
+        return np.empty(0), 0
+
+    # Clamp to the dataset extent (a partly-outside tile keeps its overlap).
+    col_off = max(0, int(math.floor(win.col_off)))
+    row_off = max(0, int(math.floor(win.row_off)))
+    col_end = min(dataset.width, int(math.ceil(win.col_off + win.width)))
+    row_end = min(dataset.height, int(math.ceil(win.row_off + win.height)))
+    if col_end <= col_off or row_end <= row_off:
+        return np.empty(0), 0
+
+    try:
+        data = dataset.read(1, window=Window(col_off, row_off, col_end - col_off, row_end - row_off))
+    except Exception:
+        return np.empty(0), 0
+
+    total = int(data.size)
+    arr = data.astype("float64", copy=False).ravel()
+    if dataset.nodata is not None:
+        arr = arr[arr != dataset.nodata]
+    arr = arr[np.isfinite(arr)]
+    return arr, total
+
+
+def _chm_stats(dataset, bounds: list[float], bounds_crs) -> dict:
+    """Canopy-height summary for one tile footprint (heights in the CHM's units)."""
+    values, total = _read_valid_values(dataset, bounds, bounds_crs)
+    if values.size == 0:
+        return {
+            "chm_mean": None,
+            "chm_max": None,
+            "chm_p95": None,
+            "chm_valid_frac": (0.0 if total else None),
+        }
+    return {
+        "chm_mean": round(float(values.mean()), 3),
+        "chm_max": round(float(values.max()), 3),
+        "chm_p95": round(float(np.percentile(values, 95)), 3),
+        "chm_valid_frac": round(values.size / total, 4),
+    }
+
+
+def _ndvi_stats(dataset, bounds: list[float], bounds_crs, *, veg_threshold: float) -> dict:
+    """NDVI summary for one tile footprint; *veg_threshold* sets the vegetation cut."""
+    values, _ = _read_valid_values(dataset, bounds, bounds_crs)
+    if values.size == 0:
+        return {"ndvi_mean": None, "ndvi_veg_frac": None}
+    return {
+        "ndvi_mean": round(float(values.mean()), 4),
+        "ndvi_veg_frac": round(float((values >= veg_threshold).mean()), 4),
+    }
+
+
+def _enrich_with_band_stats(
+    index: dict,
+    *,
+    bounds_crs,
+    chm_path: str | Path | None = None,
+    ndvi_path: str | Path | None = None,
+    ndvi_veg_threshold: float = 0.3,
+) -> dict:
+    """Attach per-tile CHM/NDVI stats to every feature of *index*, in place.
+
+    Each source is opened once and sampled at every tile's native ``bounds``.
+    Enrichment is best-effort: a source that cannot be opened is recorded but
+    skipped, and per-tile read failures degrade to ``null`` stats (see
+    :func:`_read_valid_values`) — tiling output is never lost to this step.
+    """
+    md = index["metadata"]
+
+    for label, path, sampler in (
+        ("chm", chm_path, lambda ds, b: _chm_stats(ds, b, bounds_crs)),
+        ("ndvi", ndvi_path, lambda ds, b: _ndvi_stats(ds, b, bounds_crs, veg_threshold=ndvi_veg_threshold)),
+    ):
+        if not path:
+            continue
+        md[f"{label}_source"] = str(Path(path).resolve())
+        if label == "ndvi":
+            md["ndvi_veg_threshold"] = ndvi_veg_threshold
+        try:
+            dataset = rasterio.open(path)
+        except Exception as exc:  # missing / unreadable source: record, skip
+            print(f"WARNING: could not open {label.upper()} {path}: {exc}")
+            continue
+        try:
+            for feature in index["features"]:
+                feature["properties"].update(sampler(dataset, feature["properties"]["bounds"]))
+        finally:
+            dataset.close()
+
+    return index
+
+
 def tile_raster(
     input_tif: str | Path,
     output_dir: str | Path,
@@ -191,6 +303,9 @@ def tile_raster(
     image_format: Literal["png", "jpg"] = "png",
     write_metadata: bool = True,
     write_geojson: bool = True,
+    chm_path: str | Path | None = None,
+    ndvi_path: str | Path | None = None,
+    ndvi_veg_threshold: float = 0.3,
     num_workers: int = 8,
     # Quality-filter parameters forwarded to process_tile / is_blank_tile.
     blank_threshold: float = 0.95,
@@ -310,6 +425,14 @@ def tile_raster(
             saved_count=saved_count,
             skipped_count=skipped_count,
         )
+        if chm_path or ndvi_path:
+            _enrich_with_band_stats(
+                index,
+                bounds_crs=src_crs,
+                chm_path=chm_path,
+                ndvi_path=ndvi_path,
+                ndvi_veg_threshold=ndvi_veg_threshold,
+            )
         geojson_name = "tiles_index.geojson"
         (output_path / geojson_name).write_text(json.dumps(index, indent=2), encoding="utf-8")
         geojson_index = geojson_name
@@ -362,6 +485,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--num-workers", type=int, default=8, help="Number of parallel workers (default: 8)")
 
+    bands = parser.add_argument_group("per-tile band stats (added to tiles_index.geojson)")
+    bands.add_argument("--chm", metavar="PATH", help="CHM raster to sample per-tile height stats from")
+    bands.add_argument("--ndvi", metavar="PATH", help="NDVI raster to sample per-tile vegetation stats from")
+    bands.add_argument(
+        "--ndvi-veg-threshold",
+        type=float,
+        default=0.3,
+        metavar="VAL",
+        help="NDVI value at/above which a pixel counts as vegetation (default: 0.3)",
+    )
+
     qf = parser.add_argument_group("quality filters")
     qf.add_argument(
         "--blank-threshold",
@@ -411,6 +545,9 @@ def main(argv: list[str] | None = None) -> int:
         image_format=args.image_format,
         write_metadata=not args.no_metadata,
         write_geojson=not args.no_geojson,
+        chm_path=args.chm,
+        ndvi_path=args.ndvi,
+        ndvi_veg_threshold=args.ndvi_veg_threshold,
         num_workers=args.num_workers,
         blank_threshold=args.blank_threshold,
         variance_threshold=args.variance_threshold,

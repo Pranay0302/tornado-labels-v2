@@ -36,8 +36,22 @@ def _make_ungeoref_tif(path: Path, size: int) -> None:
         dst.write(data)
 
 
+def _make_band_tif(path: Path, array: np.ndarray, *, nodata: float, size: int = 1280) -> None:
+    """Single-band float32 raster on the same grid as ``_make_tif`` (EPSG:32614)."""
+    h, w = array.shape
+    with rasterio.open(
+        path, "w", driver="GTiff", height=h, width=w, count=1, dtype="float32",
+        crs="EPSG:32614", transform=from_origin(500000, 4000000, 1, 1), nodata=nodata,
+    ) as dst:
+        dst.write(array.astype("float32"), 1)
+
+
 def _read_geojson(tiles_dir: Path) -> dict:
     return json.loads((tiles_dir / "tiles_index.geojson").read_text(encoding="utf-8"))
+
+
+def _by_rowcol(gj: dict) -> dict:
+    return {(f["properties"]["row"], f["properties"]["col"]): f["properties"] for f in gj["features"]}
 
 
 def test_defaults_are_big_and_full_only():
@@ -189,3 +203,105 @@ def test_geojson_for_ungeoreferenced_source(tmp_path):
     feat = gj["features"][0]
     assert feat["geometry"]["type"] == "Polygon"
     assert len(feat["properties"]["window"]) == 4
+
+
+def test_no_band_paths_leaves_geojson_unchanged(tmp_path):
+    tif = tmp_path / "site.tif"
+    _make_tif(tif, 1280)
+    out = tmp_path / "tiles"
+
+    tile_raster(tif, out, tile_size=640, overlap=0)
+    gj = _read_geojson(out)
+
+    assert "chm_source" not in gj["metadata"]
+    assert "ndvi_source" not in gj["metadata"]
+    for feat in gj["features"]:
+        assert not any(k.startswith(("chm_", "ndvi_")) for k in feat["properties"])
+
+
+def test_chm_stats_added_per_tile(tmp_path):
+    tif = tmp_path / "site.tif"
+    _make_tif(tif, 1280)
+    chm = tmp_path / "site_CHM.tif"
+    _make_band_tif(chm, np.full((1280, 1280), 3.0), nodata=-9999.0)
+    out = tmp_path / "tiles"
+
+    tile_raster(tif, out, tile_size=640, overlap=0, chm_path=chm)
+    gj = _read_geojson(out)
+
+    assert gj["metadata"]["chm_source"] == str(chm.resolve())
+    for props in _by_rowcol(gj).values():
+        assert props["chm_mean"] == 3.0
+        assert props["chm_max"] == 3.0
+        assert props["chm_p95"] == 3.0
+        assert props["chm_valid_frac"] == 1.0
+
+
+def test_chm_nodata_is_excluded(tmp_path):
+    tif = tmp_path / "site.tif"
+    _make_tif(tif, 1280)
+    # Whole CHM is nodata except the top-half rows of the top-left tile.
+    arr = np.full((1280, 1280), -9999.0)
+    arr[0:320, 0:640] = 8.0
+    chm = tmp_path / "site_CHM.tif"
+    _make_band_tif(chm, arr, nodata=-9999.0)
+    out = tmp_path / "tiles"
+
+    tile_raster(tif, out, tile_size=640, overlap=0, chm_path=chm)
+    props = _by_rowcol(_read_geojson(out))
+
+    top_left = props[(0, 0)]
+    assert top_left["chm_mean"] == 8.0                 # nodata pixels excluded
+    assert top_left["chm_valid_frac"] == 0.5           # only half the tile is valid
+
+    all_nodata = props[(1, 1)]
+    assert all_nodata["chm_mean"] is None
+    assert all_nodata["chm_valid_frac"] == 0.0
+
+
+def test_ndvi_stats_and_threshold(tmp_path):
+    tif = tmp_path / "site.tif"
+    _make_tif(tif, 1280)
+    ndvi = tmp_path / "site_NDVI.tif"
+    _make_band_tif(ndvi, np.full((1280, 1280), 0.6), nodata=-32767.0)
+    out = tmp_path / "tiles"
+
+    # Default threshold 0.3 -> all pixels count as vegetation.
+    tile_raster(tif, out, tile_size=640, overlap=0, ndvi_path=ndvi)
+    gj = _read_geojson(out)
+    assert gj["metadata"]["ndvi_source"] == str(ndvi.resolve())
+    assert gj["metadata"]["ndvi_veg_threshold"] == 0.3
+    for props in _by_rowcol(gj).values():
+        assert props["ndvi_mean"] == 0.6
+        assert props["ndvi_veg_frac"] == 1.0
+
+    # Raise threshold above the constant value -> nothing counts as vegetation.
+    out2 = tmp_path / "tiles2"
+    tile_raster(tif, out2, tile_size=640, overlap=0, ndvi_path=ndvi, ndvi_veg_threshold=0.7)
+    gj2 = _read_geojson(out2)
+    assert gj2["metadata"]["ndvi_veg_threshold"] == 0.7
+    for props in _by_rowcol(gj2).values():
+        assert props["ndvi_veg_frac"] == 0.0
+
+
+def test_tile_outside_chm_extent_gets_null_stats(tmp_path):
+    tif = tmp_path / "site.tif"
+    _make_tif(tif, 1280)
+    # CHM only covers the top-left 640x640 (the (0,0) tile); other tiles miss it.
+    chm = tmp_path / "small_CHM.tif"
+    _make_band_tif(chm, np.full((640, 640), 2.0), nodata=-9999.0)
+    out = tmp_path / "tiles"
+
+    tile_raster(tif, out, tile_size=640, overlap=0, chm_path=chm)
+    props = _by_rowcol(_read_geojson(out))
+
+    assert props[(0, 0)]["chm_mean"] == 2.0
+    assert props[(1, 1)]["chm_mean"] is None
+    assert props[(1, 1)]["chm_valid_frac"] is None
+
+
+def test_band_flags_exposed_on_cli():
+    args = _build_parser().parse_args(["in.tif", "out"])
+    assert args.chm is None
+    assert args.ndvi is None
+    assert args.ndvi_veg_threshold == 0.3
