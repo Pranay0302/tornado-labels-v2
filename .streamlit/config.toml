@@ -1,0 +1,7 @@
+# Streamlit config for the GeoTIFF inspector (src/gui/app.py).
+# The inspector reads large orthomosaics *in place* via windowed/downsampled
+# reads, so the browser uploader is only a convenience for small sample files.
+# The cap below just keeps mid-size samples from being rejected outright; real
+# multi-GB / 50GB orthomosaics should be selected by path, never uploaded.
+[server]
+maxUploadSize = 1024  # MB

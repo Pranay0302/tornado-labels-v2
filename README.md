@@ -129,6 +129,40 @@ python3 src/labeling/roboflow_upload.py outputs/tiles --project site-a
 
 ---
 
+## GeoTIFF Inspector (GUI)
+
+A minimal Streamlit app for inspecting an orthomosaic and previewing the tiling
+**before** you commit to a run:
+
+```bash
+streamlit run src/gui/app.py
+```
+
+Pick a `.tif`/`.tiff` in the sidebar — choose from files discovered under
+`data/`/`outputs/` (or point **Folder to scan** at wherever your orthomosaics
+live), or paste an absolute path. **Very large orthomosaics (tens of GB) are read
+in place** via windowed/downsampled reads, so select them by path — the browser
+uploader is only a size-capped convenience for small sample files. Then explore
+three tabs:
+
+- **Metadata** — width/height, CRS + EPSG, resolution, native + lon/lat bounds,
+  affine transform, NoData, per-band dtype / colour-interpretation / description,
+  plus driver, compression, internal tiling + block size, overview levels and
+  on-disk size.
+- **Bands** — view any single band with a colormap (with min/max/mean/std and a
+  histogram) or an RGB composite from chosen bands.
+- **Tiles** — enter tile size / overlap and see the expected tiles along X and Y,
+  the grid total, how many are full vs. dropped edge tiles, the grid overlaid on a
+  downsampled preview, and a single-tile preview. A **Run tiling** button calls the
+  same `tile_raster()` the pipeline uses (Roboflow upload stays on the CLI).
+
+All previews use windowed / downsampled reads, so multi-GB GeoTIFFs are never
+loaded whole into memory. The tile-count math and grid come from the tiler's own
+`iter_tile_windows()` / `tile_grid()`, so the numbers shown match what a run
+produces.
+
+---
+
 ## Labeling Schema
 
 Annotate polygons in Roboflow using the 8 classes in `schemas/classes.txt`:
@@ -160,8 +194,12 @@ tornado-labels-v2/
 ├── scripts/
 │   └── run_pipeline.py           # tile + upload entry point
 ├── src/
+│   ├── gui/
+│   │   ├── app.py                # Streamlit GeoTIFF inspector (streamlit run)
+│   │   ├── raster_inspect.py     # metadata + memory-safe reads + rendering
+│   │   └── tiling_preview.py     # tile-grid summary + overlay
 │   ├── labeling/
-│   │   ├── tile_orthomosaic.py   # tiling
+│   │   ├── tile_orthomosaic.py   # tiling (+ tile_grid / iter_tile_windows)
 │   │   └── roboflow_upload.py    # Roboflow upload
 │   └── utils/
 │       ├── image_utils.py        # blank-tile detection

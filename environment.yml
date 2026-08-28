@@ -6,8 +6,10 @@ dependencies:
   - rasterio
   - pillow
   - numpy
+  - matplotlib
   - pip
   - pip:
       - tqdm
       - roboflow
       - python-dotenv
+      - streamlit

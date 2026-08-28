@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import sys
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal
@@ -25,6 +26,49 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.utils import ensure_directory, is_blank_tile
+
+
+def tile_grid(width: int, height: int, tile_size: int, overlap: int) -> tuple[int, int]:
+    """Return the ``(x_steps, y_steps)`` tile-grid dimensions for a raster.
+
+    ``x_steps * y_steps`` is the number of grid cells walked by
+    :func:`iter_tile_windows`; it is an *upper bound* on the number of tiles
+    actually saved, since edge cells (with ``min_coverage``) and blank / nodata
+    tiles are dropped downstream.
+    """
+    if tile_size <= 0:
+        raise ValueError("tile_size must be positive")
+    if overlap < 0 or overlap >= tile_size:
+        raise ValueError("overlap must be in [0, tile_size)")
+    step = tile_size - overlap
+    x_steps = math.ceil((width - overlap) / step)
+    y_steps = math.ceil((height - overlap) / step)
+    return x_steps, y_steps
+
+
+def iter_tile_windows(
+    width: int, height: int, tile_size: int, overlap: int
+) -> Iterator[tuple[int, int, Window]]:
+    """Yield ``(row, col, window)`` for every tile position over a raster.
+
+    Windows are produced top-to-bottom, left-to-right. Edge windows are clamped
+    to the raster extent (so trailing tiles may be smaller than ``tile_size``),
+    and zero-area positions are skipped. These are exactly the windows
+    :func:`tile_raster` reads, so any consumer — e.g. a GUI grid overlay or
+    tile-count preview — that walks this generator sees the same tiling the
+    pipeline will produce.
+    """
+    x_steps, y_steps = tile_grid(width, height, tile_size, overlap)
+    step = tile_size - overlap
+    for row in range(y_steps):
+        for col in range(x_steps):
+            x0 = col * step
+            y0 = row * step
+            window_width = min(tile_size, width - x0)
+            window_height = min(tile_size, height - y0)
+            if window_width <= 0 or window_height <= 0:
+                continue
+            yield row, col, Window(x0, y0, window_width, window_height)
 
 
 def process_tile(
@@ -349,25 +393,14 @@ def tile_raster(
         nodata = src.nodata
         src_crs = src.crs
         src_transform = src.transform
-        step = tile_size - overlap
-        x_steps = math.ceil((width - overlap) / step)
-        y_steps = math.ceil((height - overlap) / step)
 
+    x_steps, y_steps = tile_grid(width, height, tile_size, overlap)
     print(f"Creating tiles: {x_steps}x{y_steps} = {x_steps * y_steps} total tiles")
 
     tasks = []
-    for row in range(y_steps):
-        for col in range(x_steps):
-            x0 = col * step
-            y0 = row * step
-            window_width = min(tile_size, width - x0)
-            window_height = min(tile_size, height - y0)
-            if window_width <= 0 or window_height <= 0:
-                continue
-
-            window = Window(x0, y0, window_width, window_height)
-            tile_name = f"tile_y{row:04d}_x{col:04d}{ext}"
-            tasks.append((window, tile_name, row, col))
+    for row, col, window in iter_tile_windows(width, height, tile_size, overlap):
+        tile_name = f"tile_y{row:04d}_x{col:04d}{ext}"
+        tasks.append((window, tile_name, row, col))
 
     saved_count = 0
     skipped_count = 0
