@@ -131,35 +131,34 @@ python3 src/labeling/roboflow_upload.py outputs/tiles --project site-a
 
 ## GeoTIFF Inspector (GUI)
 
-A minimal Streamlit app for inspecting an orthomosaic and previewing the tiling
-**before** you commit to a run:
+A Streamlit app to inspect an orthomosaic and preview the tiling before a run.
+
+Set up the environment (once):
 
 ```bash
+conda env create -f environment.yml -n tornado-labels
+```
+
+Then activate it and start the app:
+
+```bash
+conda activate tornado-labels
 streamlit run src/gui/app.py
 ```
 
-Pick a `.tif`/`.tiff` in the sidebar — choose from files discovered under
-`data/`/`outputs/` (or point **Folder to scan** at wherever your orthomosaics
-live), or paste an absolute path. **Very large orthomosaics (tens of GB) are read
-in place** via windowed/downsampled reads, so select them by path — the browser
-uploader is only a size-capped convenience for small sample files. Then explore
-three tabs:
+Pick a `.tif`/`.tiff` in the sidebar: browse files under `data/`/`outputs/`, point
+**Folder to scan** at your own data, or paste an absolute path. Big files are read
+in place, so select them by path; upload is for small samples only.
 
-- **Metadata** — width/height, CRS + EPSG, resolution, native + lon/lat bounds,
-  affine transform, NoData, per-band dtype / colour-interpretation / description,
-  plus driver, compression, internal tiling + block size, overview levels and
-  on-disk size.
-- **Bands** — view any single band with a colormap (with min/max/mean/std and a
-  histogram) or an RGB composite from chosen bands.
-- **Tiles** — enter tile size / overlap and see the expected tiles along X and Y,
-  the grid total, how many are full vs. dropped edge tiles, the grid overlaid on a
-  downsampled preview, and a single-tile preview. A **Run tiling** button calls the
-  same `tile_raster()` the pipeline uses (Roboflow upload stays on the CLI).
+Three tabs:
 
-All previews use windowed / downsampled reads, so multi-GB GeoTIFFs are never
-loaded whole into memory. The tile-count math and grid come from the tiler's own
-`iter_tile_windows()` / `tile_grid()`, so the numbers shown match what a run
-produces.
+- **Metadata**: size, CRS/EPSG, resolution, bounds, NoData, per-band dtype, and storage details.
+- **Bands**: view a single band with a colormap (min/max/mean/std + histogram) or an RGB composite.
+- **Tiles**: set tile size/overlap to preview the grid and tile counts, then **Run tiling** to write
+  the chips with the same `tile_raster()` the pipeline uses (Roboflow upload stays on the CLI).
+
+Previews use windowed/downsampled reads, so multi-GB GeoTIFFs are never loaded whole
+into memory, and the tile counts match what a run produces.
 
 ---
 
