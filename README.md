@@ -4,13 +4,16 @@
 
 Tiles a tornado-damage orthomosaic (`.tif`) into uniform image chips and uploads
 them to [Roboflow](https://app.roboflow.com) for **instance-segmentation**
-annotation and dataset management.
+annotation and dataset management. A Streamlit GUI lets you inspect the raster and
+preview the tiling before you run.
 
 ```mermaid
 flowchart LR
     A[orthomosaic.tif] --> B[tile_orthomosaic.py<br/>640px full tiles]
     B --> C[roboflow_upload.py<br/>upload to Roboflow]
-    C --> D[Roboflow<br/>annotate · version · export]
+    C --> D[Roboflow<br/>annotate, version, export]
+    A -. optional preview .-> G[GeoTIFF Inspector GUI<br/>inspect + preview tiling]
+    G -.-> B
 ```
 
 One command does both steps:
