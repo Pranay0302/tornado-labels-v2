@@ -158,7 +158,7 @@ def read_overview(path: str | Path, max_dim: int = 1024) -> tuple[np.ndarray, fl
 
 
 def read_tile(path: str | Path, window: Window) -> np.ndarray:
-    """Native-resolution read of a single tile window — ``(count, h, w)``."""
+    """Native-resolution read of a single tile window - ``(count, h, w)``."""
     with rasterio.open(path) as src:
         return src.read(window=window)
 

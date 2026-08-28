@@ -73,7 +73,7 @@ def to_display_rgb(overview: np.ndarray, bands: tuple[int, int, int] | None = No
 
 
 # --------------------------------------------------------------------------- #
-# Cached wrappers — keyed on (path, mtime) so edits bust the cache but repeated
+# Cached wrappers - keyed on (path, mtime) so edits bust the cache but repeated
 # widget interactions on the same file are instant.
 # --------------------------------------------------------------------------- #
 @st.cache_data(show_spinner=False)
@@ -104,9 +104,7 @@ def _mtime(path: Path) -> float:
 def _select_source() -> Path | None:
     st.sidebar.header("Source")
     st.sidebar.caption(
-        "Large orthomosaics (tens of GB) are read in place with windowed / "
-        "downsampled reads — pick from the list or paste a path. Upload is for "
-        "small samples only."
+        "Pick from the list or paste a path. Upload is for small samples only."
     )
 
     scan_dir = st.sidebar.text_input(
@@ -118,7 +116,7 @@ def _select_source() -> Path | None:
         roots.append(Path(scan_dir).expanduser())
 
     label_to_path = {label_for(p): p for p in discover_tif_files(*roots)}
-    labels = ["— none —"] + list(label_to_path)
+    labels = ["- none -"] + list(label_to_path)
     picked = st.sidebar.selectbox("Discovered rasters", labels, index=0)
 
     pasted = st.sidebar.text_input(
@@ -127,8 +125,7 @@ def _select_source() -> Path | None:
 
     with st.sidebar.expander("Upload a small sample (not for large files)"):
         st.caption(
-            "Browser upload buffers the whole file in memory and is size-capped — "
-            "use the path/list above for big orthomosaics."
+            "For small files only. Use the path/list above for big ones."
         )
         uploaded = st.file_uploader("Upload .tif/.tiff", type=["tif", "tiff"], key="src_upload")
 
@@ -140,7 +137,7 @@ def _select_source() -> Path | None:
         return tmp_path
     if pasted:
         return Path(pasted).expanduser()
-    if picked != "— none —":
+    if picked != "- none -":
         return label_to_path[picked]
     return None
 
@@ -150,7 +147,7 @@ def _select_source() -> Path | None:
 # --------------------------------------------------------------------------- #
 def _fmt(value, nd: int = 4) -> str:
     if value is None:
-        return "—"
+        return "-"
     if isinstance(value, float):
         return f"{value:,.{nd}f}"
     return str(value)
@@ -165,8 +162,8 @@ def _render_metadata_tab(md: dict) -> None:
     c4.metric("File size", f"{size_mb:,.1f} MB")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("CRS", md["crs"] or "—")
-    c2.metric("EPSG", md["epsg"] or "—")
+    c1.metric("CRS", md["crs"] or "-")
+    c2.metric("EPSG", md["epsg"] or "-")
     c3.metric("Resolution", f"{_fmt(md['res_x'])} × {_fmt(md['res_y'])} {md['units'] or ''}".strip())
     c4.metric("NoData", _fmt(md["nodata"]))
 
@@ -177,7 +174,7 @@ def _render_metadata_tab(md: dict) -> None:
             "bounds (native)": f"[{_fmt(left)}, {_fmt(bottom)}, {_fmt(right)}, {_fmt(top)}]",
             "bounds (lon/lat)": (
                 "[" + ", ".join(_fmt(v, 6) for v in md["bounds_lonlat"]) + "]"
-                if md["bounds_lonlat"] else "—"
+                if md["bounds_lonlat"] else "-"
             ),
             "affine transform": "[" + ", ".join(_fmt(v, 6) for v in md["transform"]) + "]",
         }
@@ -189,7 +186,7 @@ def _render_metadata_tab(md: dict) -> None:
             "band": list(range(1, md["band_count"] + 1)),
             "dtype": md["dtypes"],
             "color interp": md["color_interpretations"],
-            "description": [d or "—" for d in md["band_descriptions"]],
+            "description": [d or "-" for d in md["band_descriptions"]],
         },
         width="stretch",
         hide_index=True,
@@ -218,7 +215,7 @@ def _render_bands_tab(path: Path, md: dict, overview: np.ndarray, max_dim: int) 
             cmap = st.selectbox("Colormap", COLORMAPS)
         with col_b:
             image = ri.render_single_band(overview[band - 1], cmap=cmap)
-            st.image(image, caption=f"Band {band} ({cmap}) — downsampled preview",
+            st.image(image, caption=f"Band {band} ({cmap}) - downsampled preview",
                      width="stretch")
 
         stats = _cached_band_stats(str(path), _mtime(path), band)
@@ -245,7 +242,7 @@ def _render_bands_tab(path: Path, md: dict, overview: np.ndarray, max_dim: int) 
         g = c2.selectbox("G band", list(range(1, band_count + 1)), index=1)
         b = c3.selectbox("B band", list(range(1, band_count + 1)), index=2)
         image = to_display_rgb(overview, bands=(r, g, b))
-        st.image(image, caption=f"RGB = bands {r}/{g}/{b} — downsampled preview",
+        st.image(image, caption=f"RGB = bands {r}/{g}/{b} - downsampled preview",
                  width="stretch")
 
 
@@ -295,7 +292,7 @@ def _render_tiles_tab(
             tile = ri.read_tile(path, window)
             st.image(
                 to_display_rgb(tile),
-                caption=f"Tile (row {selected[0]}, col {selected[1]}) — "
+                caption=f"Tile (row {selected[0]}, col {selected[1]}) - "
                         f"{int(window.width)}×{int(window.height)} px, native resolution",
             )
 
@@ -310,7 +307,7 @@ def _render_tiles_tab(
             )
         st.success(
             f"Saved {meta['saved_tiles']} tiles "
-            f"(skipped {meta['skipped_tiles']}) → {out_dir}"
+            f"(skipped {meta['skipped_tiles']}) -> {out_dir}"
         )
         st.json(meta)
 
@@ -327,9 +324,9 @@ def _window_for(width, height, tile_size, overlap, selected):
 # Entry point
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    st.set_page_config(page_title="GeoTIFF Inspector", page_icon="🛰️", layout="wide")
-    st.title("🛰️ GeoTIFF Orthomosaic Inspector")
-    st.caption("Inspect metadata, bands, and the tiling grid — with memory-safe windowed reads.")
+    st.set_page_config(page_title="GeoTIFF Inspector", layout="wide")
+    st.title("GeoTIFF Orthomosaic Inspector")
+    st.caption("Inspect metadata, bands, and the tiling grid - with memory-safe windowed reads.")
 
     path = _select_source()
 
@@ -358,7 +355,7 @@ def main() -> None:
     with st.spinner("Reading downsampled overview…"):
         overview, _decimation = _cached_overview(str(path), _mtime(path), max_dim)
 
-    st.success(f"Loaded **{path.name}** — {md['width']:,} × {md['height']:,} px, "
+    st.success(f"Loaded **{path.name}** - {md['width']:,} × {md['height']:,} px, "
                f"{md['band_count']} band(s)")
 
     tab_meta, tab_bands, tab_tiles = st.tabs(["Metadata", "Bands", "Tiles"])

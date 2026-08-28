@@ -30,7 +30,7 @@ def grid_summary(width: int, height: int, tile_size: int, overlap: int) -> dict[
     """Summarise the tile grid for a raster of ``width`` x ``height`` pixels.
 
     Returns ``x_steps``/``y_steps`` (grid dimensions), ``total`` (windows walked),
-    ``full_tiles`` (exactly ``tile_size`` square — what survives ``min_coverage``
+    ``full_tiles`` (exactly ``tile_size`` square - what survives ``min_coverage``
     ``= 1.0``) and ``edge_tiles`` (clamped remainder that is dropped by default).
     Blank / nodata filtering can still reduce the final saved count below
     ``full_tiles``; that is only known after a run.
